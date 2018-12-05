@@ -9,6 +9,7 @@ extern crate rdkafka;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
+extern crate serde_json;
 extern crate tokio;
 
 mod configuration;
@@ -34,7 +35,7 @@ fn main() -> Result<(), Box<Error>> {
     let setting = configuration::Settings::from(opt.config)?;
     debug!("Starting icmp-rust-agent with {:?}", setting);
 
-    run_async_handler(setting)?;
+    run_async_handler(&setting)?;
 
     Ok(())
 }
