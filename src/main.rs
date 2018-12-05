@@ -11,6 +11,8 @@ extern crate serde;
 extern crate serde_derive;
 extern crate serde_json;
 extern crate tokio;
+extern crate tokio_ping;
+extern crate trust_dns_resolver;
 
 mod configuration;
 mod kafka;

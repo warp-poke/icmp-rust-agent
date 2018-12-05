@@ -7,6 +7,7 @@ use rdkafka::consumer::stream_consumer::StreamConsumer;
 use rdkafka::consumer::Consumer;
 use rdkafka::Message;
 use std::error::Error;
+use std::net::*;
 use tokio::executor::current_thread::CurrentThread;
 use tokio::prelude::Stream;
 use trust_dns_resolver::config::*;
@@ -51,11 +52,6 @@ pub fn run_async_handler(config: &Settings) -> Result<(), Box<Error>> {
 
     let handle = io_loop.handle();
 
-    // Spawning DNS handler
-    let (resolver, background) =
-        AsyncResolver::new(ResolverConfig::default(), ResolverOpts::default());
-    io_loop.spawn(background);
-
     let processed_stream = consumer
         .start()
         .filter_map(|result| match result {
@@ -72,37 +68,39 @@ pub fn run_async_handler(config: &Settings) -> Result<(), Box<Error>> {
             let z = config.zone.clone();
 
             let process_message = cpu_pool
-                .spawn(
-                    lazy(move || {
-                        debug!("received a Kafka message");
-                        if let Some(payload) = owned_message.payload() {
-                            // deserialize kafka msg
-                            let r: serde_json::Result<
-                                RequestBenchEvent,
-                            > = serde_json::from_slice(payload);
-                            Ok(r)
-                        } else {
-                            Err(String::from("no payload"))
-                        }
-                    }).and_then(|msg| {
-                        debug!("resolving DNS");
-                        match msg {
+                .spawn(lazy(move || {
+                    if let Some(payload) = owned_message.payload() {
+                        // deserialize kafka msg
+                        let r: serde_json::Result<RequestBenchEvent> =
+                            serde_json::from_slice(payload);
+
+                        match r {
                             Ok(request) => {
-                                resolver.lookup_ip(request.domain_name.as_str());
-                                // TODO: resolve future
-                                // TODO: inject IP instead of lookup in a new Request
-                                Ok(request)
+                                // Construct a new Resolver with default configuration options
+                                let (resolver, background) = AsyncResolver::new(
+                                    ResolverConfig::default(),
+                                    ResolverOpts::default(),
+                                );
+                                io_loop.spawn(background);
+                                let lookup_future =
+                                    resolver.lookup_ip(request.domain_name.as_str());
+                                lookup_future.then(|resolved| {
+                                    info!("into resolved");
+                                    Ok(())
+                                });
                             }
-                            Err(e) => Err(String::from(format!("DNS error: {}", e))),
-                        }
-                        // Construct a new Resolver with default configuration options
-                    }).and_then(move |msg| {
-                        info!("pinging");
-                        // TODO
+                            Err(e) => error!("{}", e),
+                        };
+
                         Ok(())
-                    }),
-                ).or_else(|err| {
+                    } else {
+                        Err(String::from("no payload"))
+                    }
+                })).or_else(|err| {
                     warn!("Error while processing message: {:?}", err);
+                    Ok(())
+                }).and_then(|()| {
+                    info!("toto");
                     Ok(())
                 });
             handle.spawn(process_message);
