@@ -1,12 +1,21 @@
 extern crate structopt;
-
 #[macro_use]
 extern crate log;
+extern crate config;
 extern crate env_logger;
-use std::error::Error;
-extern crate icmp;
-use icmp::configuration;
+extern crate futures;
+extern crate futures_cpupool;
+extern crate rdkafka;
+extern crate serde;
+#[macro_use]
+extern crate serde_derive;
+extern crate tokio;
 
+mod configuration;
+mod kafka;
+
+use kafka::run_async_handler;
+use std::error::Error;
 use structopt::StructOpt;
 
 #[derive(StructOpt, Debug)]
@@ -24,6 +33,8 @@ fn main() -> Result<(), Box<Error>> {
 
     let setting = configuration::Settings::from(opt.config)?;
     debug!("Starting icmp-rust-agent with {:?}", setting);
-    
+
+    run_async_handler(setting)?;
+
     Ok(())
 }
