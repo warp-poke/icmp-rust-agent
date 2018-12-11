@@ -12,11 +12,11 @@ config = "0.9"
 serde = "1.0"
 serde_derive = "1.0"
 serde_json = "1.0"
-tokio = "0.1"
+tokio = {version = "0.1", features = ["async-await-preview"]}
+tokio-async-await = "0.1"
+trust-dns-resolver = "0.10"
 futures = "0.1"
-futures-cpupool = "^0.1"
-tokio-ping = "0.2.0"
-trust-dns-resolver = "0.10.0"
+tokio-ping = "0.2"
 
 [dependencies.rdkafka]
 version = "0.17.0"

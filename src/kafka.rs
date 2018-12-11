@@ -1,18 +1,15 @@
 use crate::configuration::Settings;
-use futures::future::err;
-use futures::future::ok;
-use futures::lazy;
-use futures::Future;
-use futures_cpupool::Builder;
-use rdkafka::config::ClientConfig;
-use rdkafka::consumer::stream_consumer::StreamConsumer;
-use rdkafka::consumer::Consumer;
-use rdkafka::Message;
-use std::error::Error;
-use tokio::executor::current_thread::CurrentThread;
-use tokio::prelude::Stream;
-use trust_dns_resolver::config::*;
-use trust_dns_resolver::AsyncResolver;
+
+use rdkafka::{
+    config::ClientConfig,
+    Message,
+    consumer::{StreamConsumer, Consumer},
+};
+use tokio::prelude::*;
+use tokio_async_await::await;
+use trust_dns_resolver::{AsyncResolver, config::*};
+use log::*;
+use serde_derive::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct RequestBenchEvent {
@@ -22,106 +19,92 @@ pub struct RequestBenchEvent {
     token: String,
 }
 
-// https://github.com/fede1024/rust-rdkafka/blob/master/examples/asynchronous_processing.rs
-pub fn run_async_handler(config: &Settings) -> Result<(), Box<Error>> {
-    let mut io_loop = CurrentThread::new();
+pub fn run_async_handler(config: Settings) {
+    tokio::run_async(async move {
 
-    let cpu_pool = Builder::new().pool_size(4).create();
+        let mut consumer_builder = ClientConfig::new();
 
-    let mut consumer = ClientConfig::new();
-
-    if let (Some(user), Some(pass)) = (&config.username, &config.password) {
-        consumer
-            .set("security.protocol", "SASL_SSL")
-            .set("sasl.mechanisms", "PLAIN")
-            .set("sasl.username", &user)
-            .set("sasl.password", &pass);
+        if let (Some(user), Some(pass)) = (config.username.clone(), config.password.clone()) {
+            consumer_builder
+                .set("security.protocol", "SASL_SSL")
+                .set("sasl.mechanisms", "PLAIN")
+                .set("sasl.username", &user)
+                .set("sasl.password", &pass);
     }
 
-    let consumer = consumer
-        .set("group.id", &config.consumer_group)
-        .set("bootstrap.servers", &config.broker)
-        .set("enable.partition.eof", "false")
-        .set("session.timeout.ms", "6000")
-        .set("enable.auto.commit", "true")
-        .create::<StreamConsumer<_>>()
-        .expect("Consumer creation failed");
+        let consumer: StreamConsumer = consumer_builder
+            .set("group.id", &config.consumer_group.clone())
+            .set("bootstrap.servers", &config.broker.clone())
+            .set("enable.partition.eof", "false")
+            .set("session.timeout.ms", "6000")
+            .set("enable.auto.commit", "true")
+            .create()
+            .expect("Consumer creation failed");
 
-    consumer
-        .subscribe(&[&config.topic])
-        .expect("Can't subscribe to specified topic");
+        consumer
+            .subscribe(&[&config.topic])
+            .expect("Can't subscribe to specified topic");
 
-    let handle = io_loop.handle();
+        let mut messages_stream = consumer.start();
+        debug!("starting stream consumer");
 
-    let processed_stream = consumer
-        .start()
-        .filter_map(|result| match result {
-            Ok(msg) => Some(msg),
-            Err(kafka_error) => {
-                warn!("Error while receiving from Kafka: {:?}", kafka_error);
-                None
-            }
-        })
-        .for_each(move |msg| {
-            info!("Enqueuing message for computation");
-            let owned_message = msg.detach();
+        // kafka ===================
+        while let Some(message) = await!(messages_stream.next()) {
+            debug!("got a new message");
 
-            let h = config.host.clone();
-            let z = config.zone.clone();
+            match message {
+                Err(_) => error!("Error while reading from stream."),
+                Ok(Err(e)) => error!("Kafka error: {}", e),
+                Ok(Ok(m)) => {
+                    let m_owned = m.detach();
+                    let payload = match m_owned.payload_view::<str>() { // TODO find a better for extract the payload
+                        None => "",
+                        Some(Ok(s)) => s,
+                        Some(Err(e)) => {
+                            error!("Error while deserializing message payload: {:?}", e);
+                            ""
+                        },
+                    }.to_string();  // transform str -> String to remove borrow issue
 
-            let process_message = cpu_pool
-                .spawn(
-                    lazy(move || {
-                        debug!("received a Kafka message");
-                        if let Some(payload) = owned_message.payload() {
-                            // deserialize kafka msg
-                            let r: serde_json::Result<RequestBenchEvent> =
-                                serde_json::from_slice(payload);
-                            Ok(r)
-                        } else {
-                            Err(String::from("no payload"))
-                        }
-                    })
-                    .and_then(move |msg| {
-                        debug!("resolving DNS");
-                        match msg {
-                            Ok(request) => {
-                                // Spawning DNS handler
-                                let (resolver, background) = AsyncResolver::new(
-                                    ResolverConfig::default(),
-                                    ResolverOpts::default(),
-                                );
+                    // DNS =========================
+                    // TODO move this part in his own method with a async fn
+                    tokio::spawn_async(async move {
+                        let (resolver, background) = AsyncResolver::new(
+                            ResolverConfig::default(),
+                            ResolverOpts::default()
+                        );
 
-                                // cannot be sent between threads safely :(
-                                io_loop.spawn(background);
+                        info!("lookup for the ip address of {}", payload);
 
-                                let lookup_future =
-                                    resolver.lookup_ip(request.domain_name.as_str());
+                        tokio::spawn(background);
 
-                                // TODO: resolve future
-                                lookup_future
-                            }
-                            Err(e) => err(String::from(format!("DNS error: {}", e))),
-                        }
-                        // Construct a new Resolver with default configuration options
-                    })
-                    .and_then(move |msg| {
-                        info!("pinging");
-                        // TODO
+                        let res = await!(resolver.lookup_ip(payload.as_str()));
 
-                        Ok(())
-                    }),
-                )
-                .or_else(|err| {
-                    warn!("Error while processing message: {:?}", err);
-                    Ok(())
-                });
-            handle.spawn(process_message);
-            Ok(())
-        });
+                        if let Ok(addresses) = res {
+                            // PING =====================
+                            // TODO ping all the addresses and not juste one AND remove the expect
+                            let address = addresses.iter().next().expect("no addresses returned!");
 
-    info!("Starting event loop");
-    io_loop.block_on(processed_stream).unwrap();
-    info!("Stream processing terminated");
-    Ok(())
+                            // TODO move this part in his own method
+                            let pinger = tokio_ping::Pinger::new();
+                            let stream = pinger.and_then(move |pinger| Ok(pinger.chain(address).stream()));
+                            let future = stream.and_then(|stream| {
+                                stream.take(3).for_each(|mb_time| {
+                                    match mb_time {
+                                        Some(time) => info!("time={}", time), // TODO register the result in warp10
+                                        None => info!("timeout"), // TODO register the result in warp10
+                                    }
+                                    Ok(())
+                                })
+                            });
+
+                            tokio::spawn(future.map_err(|err| { // we have to use map_err to avoid a type conflict between tokio and tokio-ping
+                                error!("Error: {}", err)
+                            }));
+                        };
+                    });
+                },
+            };
+        };
+    });
 }
