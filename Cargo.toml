@@ -2,6 +2,7 @@
 name = "icmp-rust-agent"
 version = "0.1.0"
 authors = ["Pierre Zemb <contact@pierrezemb.fr>"]
+edition = "2018"
 
 [dependencies]
 structopt = "0.2"

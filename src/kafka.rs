@@ -1,4 +1,6 @@
-use configuration::Settings;
+use crate::configuration::Settings;
+use futures::future::err;
+use futures::future::ok;
 use futures::lazy;
 use futures::Future;
 use futures_cpupool::Builder;
@@ -51,11 +53,6 @@ pub fn run_async_handler(config: &Settings) -> Result<(), Box<Error>> {
 
     let handle = io_loop.handle();
 
-    // Spawning DNS handler
-    let (resolver, background) =
-        AsyncResolver::new(ResolverConfig::default(), ResolverOpts::default());
-    io_loop.spawn(background);
-
     let processed_stream = consumer
         .start()
         .filter_map(|result| match result {
@@ -64,7 +61,8 @@ pub fn run_async_handler(config: &Settings) -> Result<(), Box<Error>> {
                 warn!("Error while receiving from Kafka: {:?}", kafka_error);
                 None
             }
-        }).for_each(move |msg| {
+        })
+        .for_each(move |msg| {
             info!("Enqueuing message for computation");
             let owned_message = msg.detach();
 
@@ -77,31 +75,44 @@ pub fn run_async_handler(config: &Settings) -> Result<(), Box<Error>> {
                         debug!("received a Kafka message");
                         if let Some(payload) = owned_message.payload() {
                             // deserialize kafka msg
-                            let r: serde_json::Result<
-                                RequestBenchEvent,
-                            > = serde_json::from_slice(payload);
+                            let r: serde_json::Result<RequestBenchEvent> =
+                                serde_json::from_slice(payload);
                             Ok(r)
                         } else {
                             Err(String::from("no payload"))
                         }
-                    }).and_then(|msg| {
+                    })
+                    .and_then(move |msg| {
                         debug!("resolving DNS");
                         match msg {
                             Ok(request) => {
-                                resolver.lookup_ip(request.domain_name.as_str());
+                                // Spawning DNS handler
+                                let (resolver, background) = AsyncResolver::new(
+                                    ResolverConfig::default(),
+                                    ResolverOpts::default(),
+                                );
+
+                                // cannot be sent between threads safely :(
+                                io_loop.spawn(background);
+
+                                let lookup_future =
+                                    resolver.lookup_ip(request.domain_name.as_str());
+
                                 // TODO: resolve future
-                                // TODO: inject IP instead of lookup in a new Request
-                                Ok(request)
+                                lookup_future
                             }
-                            Err(e) => Err(String::from(format!("DNS error: {}", e))),
+                            Err(e) => err(String::from(format!("DNS error: {}", e))),
                         }
                         // Construct a new Resolver with default configuration options
-                    }).and_then(move |msg| {
+                    })
+                    .and_then(move |msg| {
                         info!("pinging");
                         // TODO
+
                         Ok(())
                     }),
-                ).or_else(|err| {
+                )
+                .or_else(|err| {
                     warn!("Error while processing message: {:?}", err);
                     Ok(())
                 });

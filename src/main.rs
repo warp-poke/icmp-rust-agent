@@ -17,7 +17,8 @@ extern crate trust_dns_resolver;
 mod configuration;
 mod kafka;
 
-use kafka::run_async_handler;
+use crate::configuration::Settings;
+use crate::kafka::run_async_handler;
 use std::error::Error;
 use structopt::StructOpt;
 
@@ -34,7 +35,7 @@ fn main() -> Result<(), Box<Error>> {
 
     let opt = Opt::from_args();
 
-    let setting = configuration::Settings::from(opt.config)?;
+    let setting = Settings::from(opt.config)?;
     debug!("Starting icmp-rust-agent with {:?}", setting);
 
     run_async_handler(&setting)?;
