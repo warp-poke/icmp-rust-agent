@@ -1,26 +1,15 @@
-extern crate structopt;
-#[macro_use]
-extern crate log;
-extern crate config;
-extern crate env_logger;
-extern crate futures;
-extern crate futures_cpupool;
-extern crate rdkafka;
-extern crate serde;
-#[macro_use]
-extern crate serde_derive;
-extern crate serde_json;
-extern crate tokio;
-extern crate tokio_ping;
-extern crate trust_dns_resolver;
+#![feature(await_macro, async_await, futures_api)]
+#![feature(pin)]
+#![feature(arbitrary_self_types)]
+
+use structopt::StructOpt;
+use log::debug;
 
 mod configuration;
 mod kafka;
 
 use crate::configuration::Settings;
 use crate::kafka::run_async_handler;
-use std::error::Error;
-use structopt::StructOpt;
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "icmp-rust-agent")]
@@ -30,15 +19,13 @@ struct Opt {
     config: String,
 }
 
-fn main() -> Result<(), Box<Error>> {
+fn main() {
     env_logger::init();
 
     let opt = Opt::from_args();
 
-    let setting = Settings::from(opt.config)?;
+    let setting = Settings::from(opt.config).expect("invalid configuration file");
     debug!("Starting icmp-rust-agent with {:?}", setting);
 
-    run_async_handler(&setting)?;
-
-    Ok(())
+    run_async_handler(setting);
 }
